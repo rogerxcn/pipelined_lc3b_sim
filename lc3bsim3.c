@@ -178,8 +178,8 @@ int MEMORY[WORDS_IN_MEM][2];
 /* The LC-3b register file.                                      */
 /***************************************************************/
 #define LC3b_REGS 8
-int REGS[LC3b_REGS];
-//int REGS[8] = {0,1,2,3,4,5,0x123a,0xABCD};
+//int REGS[LC3b_REGS];
+int REGS[8] = {0,1,2,3,4,5,0x123a,0xABCD};
 /***************************************************************/
 /* architectural state */
 /***************************************************************/
@@ -987,6 +987,8 @@ void MEM_stage() {
   mem_target_pc = PS.MEM_ADDRESS;
   addr = PS.MEM_ADDRESS;
   mem_drid = PS.MEM_DRID;
+  dcache_r = 0;
+  mem_pcmux = 0b11;
 
   /* we logic */
 
@@ -1013,7 +1015,7 @@ void MEM_stage() {
 
   /* DCACHE DATA logic */
 
-  if (Get_DATA_SIZE(PS.MEM_CS) && get_bits(PS.MEM_ADDRESS, 0, 0))
+  if (!Get_DATA_SIZE(PS.MEM_CS) && get_bits(PS.MEM_ADDRESS, 0, 0))
   {
     data = get_bits(PS.MEM_ALU_RESULT,7,0)<<8 | get_bits(PS.MEM_ALU_RESULT,7,0);
   }else
@@ -1021,11 +1023,11 @@ void MEM_stage() {
     data = Low16bits(PS.MEM_ALU_RESULT);
   }
 
+
   /* DCACHE access */
   if(v_dcache_en){
     dcache_access(addr, &read_word, data, &dcache_r, we0, we1);
   }
-
 
   /* DCACHE word output logic */
 
@@ -1036,15 +1038,16 @@ void MEM_stage() {
   {
     if (get_bits(PS.MEM_ADDRESS, 0, 0))
     {
-      dcache_out = read_word & 0xFF;
+      dcache_out = Low16bits(SEXT((read_word>>8) & 0xFF, 8));
     }else
     {
-      dcache_out = (read_word & 0xFF00)>>8;
+      dcache_out = Low16bits(SEXT(read_word & 0x00FF, 8));
     }
   }
-
-  if(dcache_r && PS.MEM_V) NEW_PS.SR_DATA = dcache_out;
-  if(dcache_r) trap_pc = dcache_out;
+  if (!dcache_r && !v_dcache_en) dcache_out = 0;
+  if (!dcache_r && v_dcache_en) dcache_out = dcache_out;
+  NEW_PS.SR_DATA = dcache_out;
+  trap_pc = dcache_out;
 
   /* mem_stall logic */
 
@@ -1062,7 +1065,7 @@ void MEM_stage() {
   int cc_check1 = (PS.MEM_CC & 0b100) && get_bits(PS.MEM_IR, 11, 11);
   int cc_check2 = (PS.MEM_CC & 0b010) && get_bits(PS.MEM_IR, 10, 10);
   int cc_check3 = (PS.MEM_CC & 0b001) && get_bits(PS.MEM_IR, 9, 9);
-  int cc_check = cc_check1 && cc_check2 && cc_check3;
+  int cc_check = cc_check1 || cc_check2 || cc_check3;
 
   if(PS.MEM_V && cc_check && Get_BR_OP(PS.MEM_CS))
   {
@@ -1140,6 +1143,9 @@ void AGEX_stage() {
       mem_addr_val, mem_alu_result_val,
       shifter_out, alu_out, sr2mux_out;
 
+
+
+  agex_drid = PS.AGEX_DRID;
 
   /* addr1mux output */
 
@@ -1228,7 +1234,7 @@ void AGEX_stage() {
       break;
 
     case 0b11:
-      alu_out = Low16bits(PS.AGEX_SR1);
+      alu_out = Low16bits(sr2mux_out);
       break;
 
     default:
@@ -1328,23 +1334,23 @@ void DE_stage() {
   }
 
   /* signal logics */
-  v_de_br_stall = PS.DE_V && agex_cs_val[15];
+  v_de_br_stall = PS.DE_V && Get_DE_BR_STALL(agex_cs_val);
 
   /* dependency check logic */
 
   int has_dep = FALSE;
   if (Get_SR1_NEEDED(agex_cs_val))
   {
-    has_dep = (sr1_val == agex_drid && v_agex_ld_reg)?TRUE:has_dep;
-    has_dep = (sr1_val == mem_drid && v_mem_ld_reg)?TRUE:has_dep;
-    has_dep = (sr1_val == sr_reg_id && v_sr_ld_reg)?TRUE:has_dep;
+    has_dep = ((sr1_val == agex_drid) && v_agex_ld_reg)?TRUE:has_dep;
+    has_dep = ((sr1_val == mem_drid) && v_mem_ld_reg)?TRUE:has_dep;
+    has_dep = ((sr1_val == sr_reg_id) && v_sr_ld_reg)?TRUE:has_dep;
   }
 
   if (Get_SR2_NEEDED(agex_cs_val))
   {
-    has_dep = (sr2_val == agex_drid && v_agex_ld_reg)?TRUE:has_dep;
-    has_dep = (sr2_val == mem_drid && v_mem_ld_reg)?TRUE:has_dep;
-    has_dep = (sr2_val == sr_reg_id && v_sr_ld_reg)?TRUE:has_dep;
+    has_dep = ((sr2_val == agex_drid) && v_agex_ld_reg)?TRUE:has_dep;
+    has_dep = ((sr2_val == mem_drid) && v_mem_ld_reg)?TRUE:has_dep;
+    has_dep = ((sr2_val == sr_reg_id) && v_sr_ld_reg)?TRUE:has_dep;
   }
 
   if (Get_DE_BR_OP(agex_cs_val))
@@ -1390,8 +1396,8 @@ void FETCH_stage() {
 
   int inst;
   int last_pc = PC;
-
   int pc_mux_out = PC;
+
   switch (mem_pcmux) {
     case 0b10:
       pc_mux_out = trap_pc;
@@ -1399,17 +1405,17 @@ void FETCH_stage() {
     case 0b01:
       pc_mux_out = mem_target_pc;
       break;
-    default:
     case 0b00:
       pc_mux_out = PC + 2;
+      break;
   }
 
   icache_access(PC, &inst, &icache_r);
 
   int hard_stall = mem_stall || dep_stall;
-  int bubble_stall = v_de_br_stall || v_agex_br_stall || v_mem_br_stall || !icache_r;
-  int bubble_stall1 = v_de_br_stall || v_agex_br_stall || !icache_r;
-  if(!hard_stall && !bubble_stall1)
+  int bubble_stall = v_de_br_stall || v_agex_br_stall || v_mem_br_stall || (!icache_r && !v_mem_br_stall && !v_agex_br_stall && !v_de_br_stall);
+  int bubble_stall1 = v_de_br_stall || v_agex_br_stall || (!icache_r && !v_mem_br_stall && !v_agex_br_stall && !v_de_br_stall);
+  if((!hard_stall) && (!bubble_stall1) && !(v_mem_br_stall && (mem_pcmux==0b00)))
   {
     PC = pc_mux_out;
   }
